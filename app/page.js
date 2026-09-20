@@ -1,187 +1,181 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase } from "../lib/supabaseClient";
+import { supabase } from "../../lib/supabaseClient";
 
-export default function ProductsPage() {
+// ตั้งเกณฑ์แจ้งเตือนสต๊อกใกล้หมด
+const LOW_STOCK_THRESHOLD = 5;
+
+export default function SellPage() {
   const [products, setProducts] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
-  // ฟอร์มเพิ่มสินค้าใหม่
-  const [newProduct, setNewProduct] = useState({
-    sku: "", name: "", price: "", stock: "", unit: "ตัว",
-  });
-
-  // แถวที่กำลังแก้ไข (inline edit)
-  const [editingId, setEditingId] = useState(null);
-  const [editRow, setEditRow] = useState({});
+  const [selectedId, setSelectedId] = useState("");
+  const [quantity, setQuantity] = useState(1);
+  const [message, setMessage] = useState(null); // { type: 'success' | 'error', text }
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     fetchProducts();
   }, []);
 
   async function fetchProducts() {
-    setLoading(true);
     const { data, error } = await supabase
       .from("products")
       .select("*")
-      .order("created_at", { ascending: true });
+      .order("name", { ascending: true });
 
-    if (error) setError(error.message);
-    else setProducts(data);
-    setLoading(false);
+    if (!error) {
+      setProducts(data);
+      if (data.length > 0) setSelectedId(data[0].id);
+    }
   }
 
-  async function handleAddProduct(e) {
-    e.preventDefault();
-    setError("");
+  const selectedProduct = products.find((p) => p.id === selectedId);
+  const total = selectedProduct ? selectedProduct.price * Number(quantity || 0) : 0;
 
-    const { sku, name, price, stock, unit } = newProduct;
-    if (!sku || !name || !price || stock === "") {
-      setError("กรอกข้อมูลสินค้าให้ครบก่อนนะครับ");
+  // ---------------------------------------------------------
+  // 🔔 ส่งแจ้งเตือนเข้า Telegram ผ่าน API Route ของเราเอง
+  // ทำงานแบบ async/try-catch แยกออกมา เพื่อไม่ให้ error ตรงนี้
+  // ไปกระทบกับ flow การขายที่ทำสำเร็จไปแล้ว
+  // ---------------------------------------------------------
+  async function sendTelegramMessage(text) {
+    try {
+      const res = await fetch("/api/notify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        console.error("ส่งแจ้งเตือน Telegram ไม่สำเร็จ:", data.error);
+      }
+    } catch (err) {
+      // ไม่ throw ต่อ เพราะไม่ต้องการให้กระทบระบบขาย
+      console.error("เรียก /api/notify ไม่สำเร็จ:", err);
+    }
+  }
+
+  function buildOrderAlertMessage(product, qty, totalPrice, newStock) {
+    const timeStr = new Date().toLocaleString("th-TH", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+
+    return (
+      `🛍️ <b>มีรายการขายใหม่!</b>\n` +
+      `สินค้า: ${product.name}\n` +
+      `จำนวน: ${qty} ${product.unit}\n` +
+      `ราคารวม: ${totalPrice.toLocaleString("th-TH")} บาท\n` +
+      `สต๊อกคงเหลือปัจจุบัน: ${newStock} ${product.unit}\n` +
+      `เวลา: ${timeStr}`
+    );
+  }
+
+  function buildLowStockAlertMessage(product, newStock) {
+    return (
+      `🚨 <b>[เตือนภัย] สต๊อกสินค้าใกล้หมด!</b>\n` +
+      `สินค้า: ${product.name}\n` +
+      `คงเหลือเพียง: ${newStock} ${product.unit}\n` +
+      `⚠️ กรุณาเติมสต๊อกสินค้าด่วน!`
+    );
+  }
+
+  async function handleSell() {
+    setMessage(null);
+
+    if (!selectedProduct) {
+      setMessage({ type: "error", text: "กรุณาเลือกสินค้าก่อน" });
+      return;
+    }
+    const qty = Number(quantity);
+    if (!qty || qty <= 0) {
+      setMessage({ type: "error", text: "กรุณากรอกจำนวนให้ถูกต้อง" });
+      return;
+    }
+    if (qty > selectedProduct.stock) {
+      setMessage({ type: "error", text: `สต๊อกไม่พอ (คงเหลือ ${selectedProduct.stock} ${selectedProduct.unit})` });
       return;
     }
 
-    const { error } = await supabase.from("products").insert([
-      { sku, name, price: Number(price), stock: Number(stock), unit },
+    setSubmitting(true);
+
+    // 1) บันทึกรายการขายลงตาราง sales
+    const { error: saleError } = await supabase.from("sales").insert([
+      {
+        product_id: selectedProduct.id,
+        product_name: selectedProduct.name,
+        quantity: qty,
+        total_price: total,
+      },
     ]);
 
-    if (error) {
-      setError("เพิ่มสินค้าไม่สำเร็จ: " + error.message);
+    if (saleError) {
+      setMessage({ type: "error", text: "บันทึกการขายไม่สำเร็จ: " + saleError.message });
+      setSubmitting(false);
       return;
     }
 
-    setNewProduct({ sku: "", name: "", price: "", stock: "", unit: "ตัว" });
-    fetchProducts();
-  }
-
-  function startEdit(product) {
-    setEditingId(product.id);
-    setEditRow({ ...product });
-  }
-
-  function cancelEdit() {
-    setEditingId(null);
-    setEditRow({});
-  }
-
-  async function saveEdit() {
-    const { id, sku, name, price, stock, unit } = editRow;
-    const { error } = await supabase
+    // 2) อัปเดต stock ให้ลดลง
+    const newStock = selectedProduct.stock - qty;
+    const { error: stockError } = await supabase
       .from("products")
-      .update({ sku, name, price: Number(price), stock: Number(stock), unit })
-      .eq("id", id);
+      .update({ stock: newStock })
+      .eq("id", selectedProduct.id);
 
-    if (error) {
-      setError("แก้ไขไม่สำเร็จ: " + error.message);
+    if (stockError) {
+      setMessage({ type: "error", text: "ขายสำเร็จ แต่ตัดสต๊อกไม่สำเร็จ: " + stockError.message });
+      setSubmitting(false);
       return;
     }
 
-    cancelEdit();
+    // 3) แจ้งเตือนขายสำเร็จให้ผู้ใช้เห็นในเว็บทันที (ไม่รอ Telegram)
+    setMessage({ type: "success", text: `ขาย ${selectedProduct.name} x${qty} สำเร็จ 🎉` });
+    setQuantity(1);
+    setSubmitting(false);
     fetchProducts();
-  }
 
-  async function handleDelete(id) {
-    if (!confirm("ลบสินค้านี้ใช่ไหม?")) return;
+    // 4) 🔔 งานที่ 1: แจ้งเตือน Order เข้าไป Telegram (ไม่ await แบบบล็อก UI)
+    sendTelegramMessage(buildOrderAlertMessage(selectedProduct, qty, total, newStock));
 
-    const { error } = await supabase.from("products").delete().eq("id", id);
-    if (error) {
-      setError("ลบไม่สำเร็จ: " + error.message);
-      return;
+    // 5) 🔔 งานที่ 2: ถ้าสต๊อกเหลือน้อยกว่าหรือเท่ากับเกณฑ์ ยิงแจ้งเตือนเพิ่มอีก 1 ข้อความ
+    if (newStock <= LOW_STOCK_THRESHOLD) {
+      sendTelegramMessage(buildLowStockAlertMessage(selectedProduct, newStock));
     }
-    fetchProducts();
   }
 
   return (
     <div>
-      <h1>รายการสินค้า</h1>
+      <h1>ขายสินค้า</h1>
 
-      {error && <div className="msg-error">{error}</div>}
+      {message && (
+        <div className={message.type === "success" ? "msg-success" : "msg-error"}>
+          {message.text}
+        </div>
+      )}
 
-      {/* ฟอร์มเพิ่มสินค้าใหม่ */}
       <div className="card">
-        <form onSubmit={handleAddProduct}>
-          <div className="form-row">
-            <input
-              placeholder="SKU"
-              value={newProduct.sku}
-              onChange={(e) => setNewProduct({ ...newProduct, sku: e.target.value })}
-            />
-            <input
-              placeholder="ชื่อสินค้า"
-              value={newProduct.name}
-              onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
-            />
-            <input
-              placeholder="ราคา"
-              type="number"
-              value={newProduct.price}
-              onChange={(e) => setNewProduct({ ...newProduct, price: e.target.value })}
-            />
-            <input
-              placeholder="คงเหลือ"
-              type="number"
-              value={newProduct.stock}
-              onChange={(e) => setNewProduct({ ...newProduct, stock: e.target.value })}
-            />
-            <input
-              placeholder="หน่วย"
-              value={newProduct.unit}
-              onChange={(e) => setNewProduct({ ...newProduct, unit: e.target.value })}
-            />
-          </div>
-          <button type="submit" className="btn-primary">+ เพิ่มสินค้า</button>
-        </form>
-      </div>
+        <div className="form-row">
+          <select value={selectedId} onChange={(e) => setSelectedId(e.target.value)}>
+            {products.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} — ฿{Number(p.price).toLocaleString("th-TH")} (คงเหลือ {p.stock})
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            min="1"
+            value={quantity}
+            onChange={(e) => setQuantity(e.target.value)}
+            style={{ maxWidth: 100 }}
+          />
+        </div>
 
-      {/* ตารางสินค้า */}
-      <div className="card">
-        {loading ? (
-          <p>กำลังโหลด...</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>SKU</th>
-                <th>ชื่อสินค้า</th>
-                <th>ราคา</th>
-                <th>คงเหลือ</th>
-                <th>หน่วย</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {products.map((p) =>
-                editingId === p.id ? (
-                  <tr key={p.id}>
-                    <td><input value={editRow.sku} onChange={(e) => setEditRow({ ...editRow, sku: e.target.value })} /></td>
-                    <td><input value={editRow.name} onChange={(e) => setEditRow({ ...editRow, name: e.target.value })} /></td>
-                    <td><input type="number" value={editRow.price} onChange={(e) => setEditRow({ ...editRow, price: e.target.value })} /></td>
-                    <td><input type="number" value={editRow.stock} onChange={(e) => setEditRow({ ...editRow, stock: e.target.value })} /></td>
-                    <td><input value={editRow.unit} onChange={(e) => setEditRow({ ...editRow, unit: e.target.value })} /></td>
-                    <td style={{ display: "flex", gap: 6 }}>
-                      <button className="btn-primary" onClick={saveEdit}>บันทึก</button>
-                      <button className="btn-secondary" onClick={cancelEdit}>ยกเลิก</button>
-                    </td>
-                  </tr>
-                ) : (
-                  <tr key={p.id}>
-                    <td>{p.sku}</td>
-                    <td>{p.name}</td>
-                    <td>฿{Number(p.price).toLocaleString("th-TH")}</td>
-                    <td>{p.stock}</td>
-                    <td>{p.unit}</td>
-                    <td style={{ display: "flex", gap: 6 }}>
-                      <button className="btn-secondary" onClick={() => startEdit(p)}>แก้ไข</button>
-                      <button className="btn-danger" onClick={() => handleDelete(p.id)}>ลบ</button>
-                    </td>
-                  </tr>
-                )
-              )}
-            </tbody>
-          </table>
-        )}
+        <p>ยอดรวม</p>
+        <p className="total-display">฿{total.toLocaleString("th-TH")}</p>
+
+        <button className="btn-primary" onClick={handleSell} disabled={submitting}>
+          {submitting ? "กำลังบันทึก..." : "ขาย"}
+        </button>
       </div>
     </div>
   );
